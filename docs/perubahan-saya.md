@@ -5,6 +5,23 @@ OpenShorts tidak dicatat di sini; lihat `git log upstream/main` untuk itu.
 
 ---
 
+## 2026-11-26 — Video yang masih diproses bisa dihapus, prosesnya benar-benar berhenti
+
+**Diminta:** video yang sedang diproses juga bisa dihapus, dan prosesnya
+benar-benar dihentikan.
+
+**Diubah:**
+- Saat menghapus job yang berjalan, yang dimatikan bukan cuma `main.py`
+  tapi **seluruh pohon prosesnya** (ffmpeg, yt-dlp, deno, …), dicari lewat
+  `/proc`.
+- Sebelum file dihapus, proses apa pun yang masih menyebut job itu di
+  command line-nya (mis. ffmpeg yang terlepas dari induknya) ikut dimatikan.
+- Dites: induk + 2 proses anak semuanya berhenti, tidak ada yang tersisa.
+
+**File:** `app.py`
+
+---
+
 ## 2026-11-26 — Simpan video sumber sebelum hapus project
 
 **Diminta:** saat menghapus project ada opsi menyimpan video sumbernya,

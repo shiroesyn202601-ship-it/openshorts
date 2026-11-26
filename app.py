@@ -5336,11 +5336,9 @@ async def _run_main(job_id, cmd, env, tick=None):
             raise
         if job_id in _deleting_jobs:
             # The project is being deleted (DELETE /api/local/projects):
-            # stop writing into a directory that is about to go.
-            try:
-                process.kill()
-            except Exception:
-                pass
+            # stop main.py AND what it started (ffmpeg, yt-dlp, deno...), so
+            # nothing keeps writing into a directory that is about to go.
+            _kill_process_tree(process.pid)
             continue
         if time.time() - last_heartbeat >= HEARTBEAT_EVERY:
             _touch_manifest(job_id)
@@ -7073,6 +7071,56 @@ async def list_local_projects(request: Request):
     return {"projects": items}
 
 
+def _process_descendants(pid):
+    """Every process below ``pid`` (Linux /proc; the image has no ps)."""
+    children = {}
+    for entry in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as f:
+                stat = f.read().decode(errors="replace")
+            # "pid (comm) state ppid ...": comm may hold spaces/parens.
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    out, todo = [], [pid]
+    while todo:
+        for c in children.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def _processes_mentioning(text):
+    """PIDs (not this one) whose command line contains ``text``."""
+    me = os.getpid()
+    found = []
+    for entry in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if not entry.isdigit() or int(entry) == me:
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if text in cmd:
+            found.append(int(entry))
+    return found
+
+
+def _kill_process_tree(pid):
+    """SIGKILL ``pid`` and all its descendants (children first listed, so
+    none is re-parented away before it is reached)."""
+    import signal
+    for p in [*_process_descendants(pid), pid]:
+        try:
+            os.kill(p, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 _JOB_ID_RX = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
@@ -7119,6 +7167,13 @@ async def delete_local_project(job_id: str, request: Request):
         if job_id in _running_jobs or job_id in _delivering_jobs:
             raise HTTPException(status_code=409,
                                 detail="The video is still stopping. Try again in a minute.")
+        # Belt and braces: anything still running with this job in its
+        # command line (an ffmpeg that outlived its parent) is stopped too.
+        stray = _processes_mentioning(job_id)
+        for p in stray:
+            _kill_process_tree(p)
+        if stray:
+            await asyncio.sleep(1)
 
         def remove():
             freed = 0
