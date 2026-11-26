@@ -5,6 +5,25 @@ OpenShorts tidak dicatat di sini; lihat `git log upstream/main` untuk itu.
 
 ---
 
+## 2026-11-26 — Hapus project (file benar-benar dihapus)
+
+**Diminta:** project bisa dihapus, dan filenya benar-benar dibersihkan dari
+server, bukan cuma hilang dari tampilan.
+
+**Diubah:**
+- Tombol **delete** di menu Projects, dengan konfirmasi.
+- `DELETE /api/local/projects/{id}` menghapus folder `output/<id>/` (clip,
+  hasil edit, video sumber hasil download, transcript, file pendukung) dan
+  file upload `uploads/<id>_*`, lalu melupakan job di memori. Ukuran yang
+  dibebaskan ditampilkan.
+- Project yang masih diproses: prosesnya dimatikan dulu, auto-retry dan
+  resume dicegah, ditunggu sampai benar-benar berhenti, baru filenya dihapus.
+- Kalau project yang dihapus sedang terbuka, dashboard kembali ke layar awal.
+
+**File:** `app.py`, `dashboard/src/components/LocalProjectsTab.jsx`, `dashboard/src/App.jsx`
+
+---
+
 ## 2026-11-26 — Perbaikan transcribe Groq
 
 **Diminta:** transcribe gagal dengan `'ThreadPoolExecutor' object has no attribute 'acquire'`

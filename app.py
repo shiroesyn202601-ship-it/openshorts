@@ -2060,6 +2060,7 @@ _stopping = False                    # SIGTERM received: report not-ready so the
                                      # proxy stops routing here before the
                                      # listening socket closes
 _running_jobs: set = set()           # job ids with a live subprocess here
+_deleting_jobs: set = set()          # self-host project deletion in progress
 
 
 # --- Remote CPU worker (remote_worker.py, worker.py) -------------------------
@@ -5333,6 +5334,14 @@ async def _run_main(job_id, cmd, env, tick=None):
             except Exception:
                 pass
             raise
+        if job_id in _deleting_jobs:
+            # The project is being deleted (DELETE /api/local/projects):
+            # stop writing into a directory that is about to go.
+            try:
+                process.kill()
+            except Exception:
+                pass
+            continue
         if time.time() - last_heartbeat >= HEARTBEAT_EVERY:
             _touch_manifest(job_id)
             last_heartbeat = time.time()
@@ -5363,6 +5372,10 @@ async def run_job(job_id, job_data):
     try:
         returncode = await _run_main(
             job_id, cmd, env, tick=lambda: _refresh_partial_result(job_id, output_dir))
+        if job_id in _deleting_jobs:
+            jobs[job_id]['status'] = 'failed'
+            jobs[job_id]['logs'].append("🗑️ Project deleted.")
+            return
         _finish_job(job_id, returncode, output_dir)
     except Exception as e:
         jobs[job_id]['status'] = 'failed'
@@ -7039,6 +7052,78 @@ async def list_local_projects(request: Request):
         add(job_id, path if os.path.isdir(path) else None)
     items.sort(key=lambda p: p["created"], reverse=True)
     return {"projects": items}
+
+
+_JOB_ID_RX = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
+def _dir_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+@app.delete("/api/local/projects/{job_id}")
+async def delete_local_project(job_id: str, request: Request):
+    """Self-host only: delete a project for real. A running job is killed
+    first (no auto-retry), then its directory in output/ (clips, edits,
+    source download, transcript, sidecars) and its upload in uploads/ are
+    removed from disk, and the job is forgotten in memory."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _JOB_ID_RX.match(job_id):
+        raise HTTPException(status_code=400, detail="Invalid project id")
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    uploads = [f for f in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*"))]
+    if job_id not in jobs and not os.path.isdir(job_dir) and not uploads:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    _deleting_jobs.add(job_id)
+    try:
+        job = jobs.get(job_id)
+        if job is not None:
+            # Never retried, never resumed: the queue skips a job that is
+            # not 'queued', and auto-retry needs its command.
+            job['cmd'] = None
+            if job.get('status') == 'queued':
+                job['status'] = 'failed'
+        # Wait for a running job to stop and leave its delivery stage, so
+        # nothing writes into the directory after it is removed.
+        deadline = time.time() + 120
+        while (job_id in _running_jobs or job_id in _delivering_jobs) and time.time() < deadline:
+            await asyncio.sleep(1)
+        if job_id in _running_jobs or job_id in _delivering_jobs:
+            raise HTTPException(status_code=409,
+                                detail="The video is still stopping. Try again in a minute.")
+
+        def remove():
+            freed = 0
+            if os.path.isdir(job_dir):
+                freed += _dir_size(job_dir)
+                shutil.rmtree(job_dir, ignore_errors=True)
+            for f in glob.glob(os.path.join(UPLOAD_DIR, f"{job_id}_*")):
+                try:
+                    freed += os.path.getsize(f)
+                    os.remove(f)
+                except OSError:
+                    pass
+            return freed, os.path.isdir(job_dir)
+
+        freed, left = await asyncio.to_thread(remove)
+        if left:
+            raise HTTPException(status_code=500,
+                                detail="Some files could not be deleted. Try again.")
+        jobs.pop(job_id, None)
+        _rerender_locks.pop(job_id, None)
+        print(f"🗑️ Project {job_id} deleted ({freed / 1e6:.0f} MB freed)")
+        return {"success": True, "job_id": job_id, "freed_bytes": freed}
+    finally:
+        _deleting_jobs.discard(job_id)
 
 
 @app.get("/api/status/{job_id}")

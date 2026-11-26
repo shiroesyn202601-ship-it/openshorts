@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Loader2, FolderOpen, RefreshCw, Film } from 'lucide-react';
-import { apiJson } from '../lib/api';
+import { Loader2, FolderOpen, RefreshCw, Film, Trash2 } from 'lucide-react';
+import { apiJson, apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
 
 // Self-host project list (GET /api/local/projects): every video processed on
@@ -21,10 +21,12 @@ function when(ts) {
     } catch { return ''; }
 }
 
-export default function LocalProjectsTab({ currentJobId, onOpen }) {
+export default function LocalProjectsTab({ currentJobId, onOpen, onDeleted }) {
     const [projects, setProjects] = useState(null);
     const [error, setError] = useState('');
     const [opening, setOpening] = useState(null);
+    const [deleting, setDeleting] = useState(null);
+    const [notice, setNotice] = useState('');
 
     const load = useCallback(() => {
         setError('');
@@ -52,6 +54,38 @@ export default function LocalProjectsTab({ currentJobId, onOpen }) {
         }
     };
 
+    // Deletes the files on the server for real (clips, source, transcript,
+    // edits): DELETE /api/local/projects/{id}.
+    const remove = async (p) => {
+        const name = p.title || p.source || p.job_id.slice(0, 8);
+        const running = p.status === 'processing' || p.status === 'queued';
+        const ok = window.confirm(
+            `Delete "${name}"?\n\n`
+            + (running ? 'It is still processing: it will be stopped.\n' : '')
+            + 'All its files on the server (clips, source video, transcript, edits) '
+            + 'are deleted for good. This cannot be undone.');
+        if (!ok) return;
+        setDeleting(p.job_id);
+        setError('');
+        setNotice('');
+        try {
+            const res = await apiFetch(`/api/local/projects/${p.job_id}`, { method: 'DELETE' });
+            if (!res.ok) {
+                let msg = await res.text();
+                try { msg = JSON.parse(msg).detail || msg; } catch { /* plain text */ }
+                throw new Error(msg);
+            }
+            const data = await res.json();
+            setProjects((list) => (list || []).filter((x) => x.job_id !== p.job_id));
+            setNotice(`Deleted "${name}" — ${(data.freed_bytes / 1e9).toFixed(2)} GB freed on disk.`);
+            onDeleted?.(p.job_id);
+        } catch (e) {
+            setError(e.message || 'Could not delete this project.');
+        } finally {
+            setDeleting(null);
+        }
+    };
+
     return (
         <div className="h-full overflow-y-auto custom-scrollbar p-4 md:p-8">
             <div className="max-w-4xl mx-auto">
@@ -66,6 +100,7 @@ export default function LocalProjectsTab({ currentJobId, onOpen }) {
                 </div>
 
                 {error && <p className="text-sm text-warn mb-4">{error}</p>}
+                {notice && <p className="text-sm text-ok mb-4">{notice}</p>}
 
                 {projects === null ? (
                     <div className="flex justify-center py-16"><Loader2 className="animate-spin text-muted" /></div>
@@ -106,11 +141,20 @@ export default function LocalProjectsTab({ currentJobId, onOpen }) {
                                     </div>
                                     <button
                                         onClick={() => open(p)}
-                                        disabled={opening !== null}
+                                        disabled={opening !== null || deleting !== null}
                                         className="btn-ghost shrink-0"
                                     >
                                         {opening === p.job_id ? <Loader2 size={14} className="animate-spin" /> : <FolderOpen size={14} />}
                                         open
+                                    </button>
+                                    <button
+                                        onClick={() => remove(p)}
+                                        disabled={opening !== null || deleting !== null}
+                                        className="btn-ghost shrink-0 text-warn"
+                                        title="delete project and its files"
+                                    >
+                                        {deleting === p.job_id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                                        {deleting === p.job_id ? 'deleting…' : 'delete'}
                                     </button>
                                 </div>
                             );

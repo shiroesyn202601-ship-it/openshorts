@@ -2252,7 +2252,8 @@ function App() {
           {/* View: History */}
           {activeTab === 'projects' && !billingEnabled && (
             <div className="h-full animate-fade">
-              <LocalProjectsTab currentJobId={jobId} onOpen={openLocalProject} />
+              <LocalProjectsTab currentJobId={jobId} onOpen={openLocalProject}
+                onDeleted={(id) => { if (id === jobId) handleReset(); }} />
             </div>
           )}
 
