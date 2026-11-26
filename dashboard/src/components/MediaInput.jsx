@@ -51,7 +51,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [targetClips, setTargetClips] = useState('');
     const [clipMinSeconds, setClipMinSeconds] = useState('');
-    const [clipMaxSeconds, setClipMaxSeconds] = useState('');
+    // Max clip length: a visible preset (remembered), or a custom value in
+    // the advanced fields. '' = the server default (60 s).
+    const [clipMaxSeconds, setClipMaxSeconds] = useState(() => {
+        try { return localStorage.getItem('os_clip_max_seconds') || ''; } catch { return ''; }
+    });
     // Auto-hook: burn the AI hook text into every clip. On by default; the
     // choice persists so turning it off sticks across sessions.
     const [autoHook, setAutoHook] = useState(() => {
@@ -140,6 +144,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
         };
         try {
             localStorage.setItem('os_source_quality', sourceQuality);
+            localStorage.setItem('os_clip_max_seconds', clipMaxSeconds || '');
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
             localStorage.setItem('os_layout', layout);
@@ -310,6 +315,42 @@ export default function MediaInput({ onProcess, isProcessing }) {
                             );
                         })}
                     </div>
+                </div>
+
+                {/* Max clip length: presets for the common cases (a podcast
+                    thought rarely fits 60 s); any other value goes in the
+                    advanced fields below (10-180 s). */}
+                <div className="mt-5">
+                    <p className="eyebrow mb-2">Max clip length</p>
+                    <div className="grid grid-cols-4 gap-2">
+                        {[
+                            { value: '', label: '60s', hint: 'default' },
+                            { value: '90', label: '90s', hint: '1.5 min' },
+                            { value: '120', label: '120s', hint: '2 min' },
+                            { value: '180', label: '180s', hint: '3 min' },
+                        ].map((o) => {
+                            const active = (clipMaxSeconds || '') === o.value
+                                || (o.value === '' && String(clipMaxSeconds) === '60');
+                            return (
+                                <button
+                                    key={o.label}
+                                    type="button"
+                                    onClick={() => setClipMaxSeconds(o.value)}
+                                    className={`py-2.5 px-2 rounded-input border flex flex-col items-center transition-colors
+                                        ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
+                                >
+                                    <span className="font-mono text-sm leading-none">{o.label}</span>
+                                    <span className="mt-1 text-[11px] leading-tight text-muted">{o.hint}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                    {clipMaxSeconds && !['', '60', '90', '120', '180'].includes(String(clipMaxSeconds)) && (
+                        <p className="text-[11px] text-muted mt-1.5">Custom: up to {clipMaxSeconds}s (set in advanced options).</p>
+                    )}
+                    <p className="text-[11px] text-muted mt-1.5 leading-relaxed">
+                        The longest a clip may be. The AI still picks shorter ones when the moment is shorter.
+                    </p>
                 </div>
 
                 {/* Download quality (links only): 1080p H.264 by default; "best"

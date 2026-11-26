@@ -5,6 +5,23 @@ OpenShorts tidak dicatat di sini; lihat `git log upstream/main` untuk itu.
 
 ---
 
+## 2026-11-26 — Pilihan durasi maksimal clip
+
+**Diminta:** clip podcast sering nanggung karena dibatasi 60 detik; perlu
+opsi "maksimal berapa detik".
+
+**Diubah:**
+- Form input video: pilihan **Max clip length** yang langsung terlihat —
+  **60s** (default), **90s**, **120s**, **180s**. Pilihan diingat browser.
+- Nilai lain (10–180 detik) tetap bisa diisi di *advanced options*; kolom
+  itu dan tombol preset memakai nilai yang sama.
+- Ini batas atas: AI tetap memilih clip lebih pendek kalau momennya pendek.
+  Backend sudah mendukung sampai 180 detik, jadi hanya tampilan yang diubah.
+
+**File:** `dashboard/src/components/MediaInput.jsx`
+
+---
+
 ## 2026-11-26 — Pilihan kualitas download (1080p / terbaik sampai 4K)
 
 **Diminta:** download tidak harus mentok 1080p ("HD"); opsional, dipilih saat
