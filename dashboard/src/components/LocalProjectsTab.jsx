@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Loader2, FolderOpen, RefreshCw, Film, Trash2 } from 'lucide-react';
 import { apiJson, apiFetch } from '../lib/api';
 import { getApiUrl } from '../config';
+import Modal from './ui/Modal';
 
 // Self-host project list (GET /api/local/projects): every video processed on
 // this server, newest first. Opening one loads it in the Clip Generator; a
@@ -54,21 +55,84 @@ export default function LocalProjectsTab({ currentJobId, onOpen, onDeleted }) {
         }
     };
 
-    // Deletes the files on the server for real (clips, source, transcript,
-    // edits): DELETE /api/local/projects/{id}.
-    const remove = async (p) => {
+    // Asks first (DeleteDialog), optionally saving the source video to a
+    // place the user picks, then deletes the files on the server for real
+    // (clips, source, transcript, edits): DELETE /api/local/projects/{id}.
+    const [confirming, setConfirming] = useState(null); // project being confirmed
+    const [saveSource, setSaveSource] = useState(true);
+    const [saveProgress, setSaveProgress] = useState(null); // 0..1 while saving
+
+    const askDelete = (p) => {
+        setSaveSource(!!p.source_file);
+        setSaveProgress(null);
+        setConfirming(p);
+    };
+
+    // Stream /api/source/{id} into a file the user picked (Chrome/Edge:
+    // showSaveFilePicker, the OS "Save as" dialog). Returns false when the
+    // user cancelled the dialog; null when the browser has no such dialog
+    // (a plain download was started instead).
+    const saveSourceFile = async (p) => {
+        const name = p.source_file?.name || 'source.mp4';
+        if (!window.showSaveFilePicker) {
+            const a = document.createElement('a');
+            a.href = getApiUrl(`/api/source/${p.job_id}`);
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            return null;
+        }
+        let handle;
+        try {
+            handle = await window.showSaveFilePicker({ suggestedName: name });
+        } catch (e) {
+            if (e?.name === 'AbortError') return false;
+            throw e;
+        }
+        const res = await apiFetch(`/api/source/${p.job_id}`);
+        if (!res.ok || !res.body) throw new Error('Could not read the source video from the server.');
+        const total = Number(res.headers.get('content-length')) || p.source_file?.size || 0;
+        const writable = await handle.createWritable();
+        const reader = res.body.getReader();
+        let loaded = 0;
+        try {
+            setSaveProgress(0);
+            for (;;) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                await writable.write(value);
+                loaded += value.length;
+                if (total) setSaveProgress(loaded / total);
+            }
+            await writable.close();
+        } catch (e) {
+            try { await writable.abort(); } catch { /* already closed */ }
+            throw new Error(`Saving the source video failed: ${e.message || e}`);
+        }
+        if (total && loaded < total) throw new Error('The source video was not saved completely.');
+        return true;
+    };
+
+    const remove = async () => {
+        const p = confirming;
+        if (!p) return;
         const name = p.title || p.source || p.job_id.slice(0, 8);
-        const running = p.status === 'processing' || p.status === 'queued';
-        const ok = window.confirm(
-            `Delete "${name}"?\n\n`
-            + (running ? 'It is still processing: it will be stopped.\n' : '')
-            + 'All its files on the server (clips, source video, transcript, edits) '
-            + 'are deleted for good. This cannot be undone.');
-        if (!ok) return;
         setDeleting(p.job_id);
         setError('');
         setNotice('');
         try {
+            if (saveSource && p.source_file) {
+                const saved = await saveSourceFile(p);
+                if (saved === false) return; // "Save as" cancelled: keep the project
+                if (saved === null) {
+                    // No save dialog in this browser: the download runs on its
+                    // own, so the project must stay until it has finished.
+                    setConfirming(null);
+                    setNotice('The source video is downloading. Delete the project again once the download has finished (untick "save the source video").');
+                    return;
+                }
+            }
             const res = await apiFetch(`/api/local/projects/${p.job_id}`, { method: 'DELETE' });
             if (!res.ok) {
                 let msg = await res.text();
@@ -77,14 +141,20 @@ export default function LocalProjectsTab({ currentJobId, onOpen, onDeleted }) {
             }
             const data = await res.json();
             setProjects((list) => (list || []).filter((x) => x.job_id !== p.job_id));
-            setNotice(`Deleted "${name}" — ${(data.freed_bytes / 1e9).toFixed(2)} GB freed on disk.`);
+            setNotice(`Deleted "${name}" — ${(data.freed_bytes / 1e9).toFixed(2)} GB freed on disk`
+                + (saveSource && p.source_file ? ' (source video saved first).' : '.'));
+            setConfirming(null);
             onDeleted?.(p.job_id);
         } catch (e) {
             setError(e.message || 'Could not delete this project.');
+            setConfirming(null);
         } finally {
             setDeleting(null);
+            setSaveProgress(null);
         }
     };
+
+    const gb = (n) => (n ? `${(n / 1e9).toFixed(2)} GB` : '');
 
     return (
         <div className="h-full overflow-y-auto custom-scrollbar p-4 md:p-8">
@@ -148,7 +218,7 @@ export default function LocalProjectsTab({ currentJobId, onOpen, onDeleted }) {
                                         open
                                     </button>
                                     <button
-                                        onClick={() => remove(p)}
+                                        onClick={() => askDelete(p)}
                                         disabled={opening !== null || deleting !== null}
                                         className="btn-ghost shrink-0 text-warn"
                                         title="delete project and its files"
@@ -162,6 +232,74 @@ export default function LocalProjectsTab({ currentJobId, onOpen, onDeleted }) {
                     </div>
                 )}
             </div>
+
+            <Modal
+                isOpen={!!confirming}
+                onClose={() => { if (!deleting) setConfirming(null); }}
+                size="sm"
+                eyebrow="PROJECTS · DELETE"
+                title="delete project"
+            >
+                {confirming && (
+                    <div className="space-y-4 text-sm">
+                        <p className="text-ink break-words">
+                            "{confirming.title || confirming.source || confirming.job_id.slice(0, 8)}"
+                        </p>
+                        {(confirming.status === 'processing' || confirming.status === 'queued') && (
+                            <p className="text-warn text-xs">It is still processing: it will be stopped.</p>
+                        )}
+                        <p className="text-muted text-xs leading-relaxed">
+                            All its files on the server (clips, source video, transcript, edits)
+                            are deleted for good. This cannot be undone.
+                        </p>
+
+                        {confirming.source_file ? (
+                            <label className="flex items-start gap-2 p-3 border border-rule rounded-input cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={saveSource}
+                                    disabled={!!deleting}
+                                    onChange={(e) => setSaveSource(e.target.checked)}
+                                    className="mt-0.5 accent-[var(--color-accent)]"
+                                />
+                                <span>
+                                    <span className="text-ink">Save the source video first</span>
+                                    <span className="block text-xs text-muted mt-0.5 break-all">
+                                        {confirming.source_file.name} {gb(confirming.source_file.size) && `· ${gb(confirming.source_file.size)}`}
+                                    </span>
+                                    <span className="block text-xs text-muted mt-0.5">
+                                        You pick the folder and the name; the project is deleted only after it is saved.
+                                    </span>
+                                </span>
+                            </label>
+                        ) : (
+                            <p className="text-xs text-muted">The source video is no longer on the server.</p>
+                        )}
+
+                        {saveProgress !== null && (
+                            <div>
+                                <div className="flex justify-between text-xs text-muted mb-1">
+                                    <span>saving source video…</span>
+                                    <span className="readout">{Math.round(saveProgress * 100)}%</span>
+                                </div>
+                                <div className="h-1.5 bg-rule rounded">
+                                    <div className="h-1.5 rounded bg-[color:var(--color-accent)]" style={{ width: `${Math.round(saveProgress * 100)}%` }} />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="flex gap-2 pt-1">
+                            <button onClick={() => setConfirming(null)} disabled={!!deleting} className="btn-ghost">cancel</button>
+                            <button onClick={remove} disabled={!!deleting} className="btn-primary flex-1">
+                                {deleting && <Loader2 size={16} className="animate-spin text-brassink" />}
+                                {deleting
+                                    ? (saveProgress !== null ? 'saving…' : 'deleting…')
+                                    : (saveSource && confirming.source_file ? 'save & delete' : 'delete')}
+                            </button>
+                        </div>
+                    </div>
+                )}
+            </Modal>
         </div>
     );
 }

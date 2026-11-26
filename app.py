@@ -7027,10 +7027,29 @@ async def list_local_projects(request: Request):
             base = os.path.basename(metas[0]).replace('_metadata.json', '')
             if os.path.exists(os.path.join(job_path, f"{base}_clip_1.mp4")):
                 thumb = f"/videos/{job_id}/{base}_clip_1.mp4"
+        label = _job_source_label(job_id, job)
+        src_path = _locate_source(job_id)
+        src_file = None
+        if src_path:
+            ext = os.path.splitext(src_path)[1] or ".mp4"
+            stem = os.path.basename(src_path)
+            if stem.startswith(f"{job_id}_"):
+                stem = stem[len(job_id) + 1:]
+            # An upload keeps its original name in the label; a download is
+            # named after the video's title by yt-dlp.
+            if label and not label.startswith(("http://", "https://")):
+                stem = label
+            stem = os.path.splitext(stem)[0] or "source"
+            try:
+                src_size = os.path.getsize(src_path)
+            except OSError:
+                src_size = None
+            src_file = {"name": f"{stem}{ext}", "size": src_size}
         items.append({
             "job_id": job_id,
             "status": status,
-            "source": _job_source_label(job_id, job),
+            "source_file": src_file,
+            "source": label,
             "title": first.get('video_title_for_youtube_short') or None,
             "clips": len(clips),
             "created": created,

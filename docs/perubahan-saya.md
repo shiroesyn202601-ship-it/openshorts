@@ -5,6 +5,26 @@ OpenShorts tidak dicatat di sini; lihat `git log upstream/main` untuk itu.
 
 ---
 
+## 2026-11-26 — Simpan video sumber sebelum hapus project
+
+**Diminta:** saat menghapus project ada opsi menyimpan video sumbernya,
+dengan memilih sendiri lokasi penyimpanannya.
+
+**Diubah:**
+- Dialog hapus baru (menggantikan konfirmasi bawaan browser) dengan opsi
+  **"Save the source video first"** (nama file dan ukurannya ditampilkan).
+- Dicentang → jendela **Save As** dari sistem terbuka (Chrome/Edge) untuk
+  memilih folder dan nama file; video disalin ke sana dengan progress, dan
+  project baru dihapus **setelah** tersimpan utuh. Batal di Save As = project
+  tidak dihapus.
+- Browser tanpa dialog Save As (mis. Firefox): video diunduh biasa, project
+  tidak dihapus dulu; hapus lagi setelah unduhan selesai.
+- Daftar project kini menyertakan info video sumber (`source_file`: nama, ukuran).
+
+**File:** `app.py`, `dashboard/src/components/LocalProjectsTab.jsx`
+
+---
+
 ## 2026-11-26 — Hapus project (file benar-benar dihapus)
 
 **Diminta:** project bisa dihapus, dan filenya benar-benar dibersihkan dari
