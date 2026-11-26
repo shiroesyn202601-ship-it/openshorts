@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles } from 'lucide-react';
+import { Download, Share2, AlertCircle, Loader2, Copy, Check, Wand2, Palette, Type, Calendar, Languages, FileText, Link2, Scissors, Crosshair, TrendingUp, Sparkles } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { apiFetch, QuotaError, openQuotaWall } from '../lib/api';
 import { platformOptions as buildPlatformOptions, defaultPlatformFlags, flagsFromList } from '../lib/socialPlatforms';
 import { track } from '../lib/analytics';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
+import StyleModal from './StyleModal';
 import TranslateModal from './TranslateModal';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
@@ -261,6 +262,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
     const [isHooking, setIsHooking] = useState(false);
+    const [showStyleModal, setShowStyleModal] = useState(false);
+    const [isStyling, setIsStyling] = useState(false);
+    // The overlay/logo burned into the server file (clip_style.py).
+    const [clipStyle, setClipStyle] = useState(clip.style || null);
     const [isTranslating, setIsTranslating] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showTranslateModal, setShowTranslateModal] = useState(false);
@@ -328,7 +333,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // True when the current server file already carries burned-in content.
     // Browser (Remotion) renders compose over the ORIGINAL clip, so using them
     // here would silently drop those burns — chain via server FFmpeg instead.
-    const hasServerBurns = /(^|_)(subtitled|hook|hooked)_/.test(serverVideoFile || '');
+    const hasServerBurns = /(^|_)(subtitled|hook|hooked|styled|voiced)_/.test(serverVideoFile || '');
 
     // The hook currently burned into the server file (auto-hook or a manual
     // one). /api/hook REPLACES it; tracked locally so the modal stays honest
@@ -664,6 +669,43 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         }
     };
 
+    // Overlay / blur / logo: previewed live in StyleModal, rendered once here.
+    const handleStyle = async (style, remove = false) => {
+        setIsStyling(true);
+        setEditError(null);
+        try {
+            const res = await apiFetch('/api/style', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: index,
+                    input_filename: serverVideoFile,
+                    style: remove ? null : style,
+                    remove,
+                }),
+            });
+            if (!res.ok) {
+                let msg = await res.text();
+                try { msg = JSON.parse(msg).detail || msg; } catch { /* plain text */ }
+                throw new Error(msg);
+            }
+            const data = await res.json();
+            if (data.new_video_url) {
+                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                setServerVideoFile(data.new_video_url.split('/').pop());
+                setClipStyle(data.style || null);
+                if (videoRef.current) videoRef.current.load();
+                setShowStyleModal(false);
+            }
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 5000);
+        } finally {
+            setIsStyling(false);
+        }
+    };
+
     // Strip the burned hook (auto-hook or manual) off the server file.
     const handleRemoveHook = async () => {
         setIsHooking(true);
@@ -877,6 +919,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             <div className="w-full max-w-[calc(64vh*0.5625)] md:max-w-none mx-auto md:mx-0 md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
                     ref={videoRef}
+                    data-clip-player=""
                     src={playbackUrl}
                     controls
                     className="w-full h-full object-contain"
@@ -901,7 +944,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         if (durable?.url && currentVideoUrl !== durable.url) setCurrentVideoUrl(durable.url);
                         else setVideoErrored(true);
                     }}
-                    onPlay={() => {
+                    onPlay={(e) => {
+                        // One clip at a time: starting this one pauses every
+                        // other clip player on the page.
+                        document.querySelectorAll('video[data-clip-player]').forEach((v) => {
+                            if (v !== e.currentTarget && !v.paused) v.pause();
+                        });
                         if (!hasPlayed) track('ClipPlayed', { props: { clip_index: index, clips: clipCount } });
                         setHasPlayed(true);
                         const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
@@ -1135,6 +1183,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </button>
 
                     <button
+                        onClick={() => setShowStyleModal(true)}
+                        disabled={isStyling}
+                        className={QUIET_BTN}
+                    >
+                        {isStyling ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Palette size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
+                        {isStyling ? 'rendering…' : 'overlay & logo'}
+                    </button>
+
+                    <button
                         onClick={() => setShowTranslateModal(true)}
                         disabled={isTranslating}
                         className={QUIET_BTN}
@@ -1341,6 +1398,17 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 jobId={jobId}
                 clipIndex={index}
                 existingHook={activeLayers.hook}
+            />
+
+            <StyleModal
+                isOpen={showStyleModal}
+                onClose={() => setShowStyleModal(false)}
+                onApply={(style) => handleStyle(style)}
+                onRemove={() => handleStyle(null, true)}
+                isProcessing={isStyling}
+                videoUrl={originalVideoUrl}
+                jobId={jobId}
+                existingStyle={clipStyle}
             />
 
             <HookModal

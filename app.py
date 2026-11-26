@@ -1652,6 +1652,16 @@ def _strip_hook_voice(output_dir, filename):
         filename = m.group(1)
 
 
+def _strip_style(output_dir, filename):
+    """Walk ``styled_<ts>_`` (overlay/logo, clip_style.py) back to the file
+    under it. The style sits under the hook and the captions."""
+    while True:
+        m = re.match(r'^styled_\d+_(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+
 def _strip_burned_hook(output_dir, filename):
     """Walk ``hooked_<ts>_`` (and legacy ``hook_``) prefixes back to the file
     without a burned hook. Same fail-safe contract as _strip_burned_captions:
@@ -8110,7 +8120,7 @@ def _leaves_pro_mode(clip):
 def _clip_layers(clip, had_hook, had_captions):
     """What sits on top of a clip's clean file, as one comparable value: a
     served file can be reused only for the layers it was burned with."""
-    return json.dumps([had_hook and clip.get('auto_hook'), had_captions,
+    return json.dumps([clip.get('style'), had_hook and clip.get('auto_hook'), had_captions,
                        had_captions and clip.get('caption_style'),
                        had_captions and clip.get('caption_words')],
                       sort_keys=True, default=str)
@@ -8174,9 +8184,14 @@ async def _set_clip_mode_locked(req: ClipModeRequest, request: Request, job):
     # Walk the layers back to the clean file, noting which ones to put back.
     uncaptioned = await asyncio.to_thread(
         _strip_burned_captions, output_dir, served, False)
-    had_captions = uncaptioned != _strip_watermark_copy(output_dir, served)
-    base = _strip_burned_hook(output_dir, uncaptioned)
-    had_hook = base != uncaptioned and bool((clip.get('auto_hook') or {}).get('text'))
+    had_captions = uncaptioned != _strip_hook_voice(
+        output_dir, _strip_watermark_copy(output_dir, served))
+    hooked_base = _strip_burned_hook(output_dir, uncaptioned)
+    had_hook = hooked_base != uncaptioned and bool((clip.get('auto_hook') or {}).get('text'))
+    # The overlay/logo layer comes off too (pro mode reframes the clean
+    # picture) and goes back on under the hook.
+    base = _strip_style(output_dir, hooked_base)
+    clip_look = clip.get('style') if base != hooked_base else None
     loop = asyncio.get_event_loop()
 
     reservation_id = None
@@ -8249,9 +8264,18 @@ async def _set_clip_mode_locked(req: ClipModeRequest, request: Request, job):
 
         def layer():
             name = new_base
+            if clip_look:
+                import clip_style
+                styled = clip_style.styled_name(name)
+                try:
+                    clip_style.apply(os.path.join(output_dir, name),
+                                     os.path.join(output_dir, styled), clip_look, output_dir)
+                    name = styled
+                except Exception as e:
+                    print(f"⚠️ Could not put the overlay/logo back on {new_base}: {e}")
             if had_hook:
                 hook = clip['auto_hook']
-                hooked = f"hooked_{int(time.time())}_{new_base}"
+                hooked = f"hooked_{int(time.time())}_{name}"
                 try:
                     add_hook_to_video(
                         os.path.join(output_dir, name), hook['text'],
@@ -9214,6 +9238,151 @@ async def hook_voice_preview(req: HookVoicePreviewRequest, request: Request):
                                  "Cache-Control": "no-store"})
 
 
+class StyleRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    input_filename: Optional[str] = None
+    # clip_style.sanitize() schema; overlay.image_data / logo.image_data carry
+    # a newly picked image as a data: URL (stored, then referenced by name).
+    style: Optional[dict] = None
+    remove: Optional[bool] = False
+
+
+@app.get("/api/style/image/{job_id}/{name}")
+async def style_image(job_id: str, name: str, request: Request):
+    """A stored overlay/logo image, so the editor can preview a saved style."""
+    import clip_style
+    await _ensure_job_files(job_id, request)
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, jobs[job_id])
+    path = clip_style.image_path(os.path.join(OUTPUT_DIR, job_id), name)
+    if not path:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.post("/api/style")
+async def set_clip_style(req: StyleRequest, request: Request):
+    """Burn an overlay (solid / gradient / image, opacity), a blur and a logo
+    under the clip's hook and captions; ``remove`` takes them off. The hook,
+    captions and spoken intro the clip had are put back on top."""
+    import clip_style
+    import hook_voice
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs or req.clip_index < 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+    _check_editor_rate(await _owner_id(request))
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+        json_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
+        if not json_files:
+            raise HTTPException(status_code=404, detail="Metadata not found")
+        with open(json_files[0], 'r') as f:
+            data = json.load(f)
+        clips = data.get('shorts', [])
+        if req.clip_index >= len(clips):
+            raise HTTPException(status_code=404, detail="Clip not found")
+        clip = clips[req.clip_index]
+        base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
+        served = _served_clip_file(job, output_dir, base_name, clip, req.clip_index,
+                                   req.input_filename)
+        if not os.path.exists(os.path.join(output_dir, served)):
+            raise HTTPException(status_code=404, detail="Video file not found")
+
+        # New images first (a bad file is a 400 before anything is encoded).
+        style = dict(req.style or {})
+        try:
+            for kind in ("overlay", "logo"):
+                part = dict(style.get(kind) or {})
+                if part.get("image_data"):
+                    part["image"] = clip_style.store_image(output_dir, part.pop("image_data"), kind)
+                part.pop("image_data", None)
+                style[kind] = part
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        style = clip_style.sanitize(style)
+        remove = bool(req.remove) or clip_style.is_empty(style)
+
+        # Walk the layers back to the clean file, noting which go back on.
+        unvoiced = _strip_hook_voice(output_dir, _strip_watermark_copy(output_dir, served))
+        had_voice = unvoiced != _strip_watermark_copy(output_dir, served)
+        uncaptioned = await asyncio.to_thread(
+            _strip_burned_captions, output_dir, unvoiced, True)
+        had_captions = uncaptioned != unvoiced
+        unhooked = _strip_burned_hook(output_dir, uncaptioned)
+        hook = clip.get('auto_hook') or {}
+        had_hook = unhooked != uncaptioned and bool(hook.get('text'))
+        base = _strip_style(output_dir, unhooked)
+
+        def render():
+            name = base
+            if not remove:
+                styled = clip_style.styled_name(base)
+                clip_style.apply(os.path.join(output_dir, base),
+                                 os.path.join(output_dir, styled), style, output_dir)
+                name = styled
+            if had_hook:
+                hooked = f"hooked_{int(time.time())}_{name}"
+                try:
+                    add_hook_to_video(
+                        os.path.join(output_dir, name), hook['text'],
+                        os.path.join(output_dir, hooked),
+                        position=hook.get('position') or "auto",
+                        duration=hook.get('duration_seconds'),
+                        style=hook.get('style') or "pill", font=hook.get('font'),
+                        layout_ranges=clip.get('layout_ranges'),
+                        has_captions=had_captions)
+                    name = hooked
+                except Exception as e:
+                    print(f"⚠️ Could not put the hook back on {name}: {e}")
+            if had_captions:
+                recap = _reapply_captions(req.job_id, req.clip_index,
+                                          os.path.join(output_dir, name))
+                if recap:
+                    name = os.path.basename(recap)
+            spoken = hook.get('voice') if had_hook and had_voice else None
+            if isinstance(spoken, dict):
+                voiced = hook_voice.voiced_name(name)
+                try:
+                    hook_voice.apply(os.path.join(output_dir, name),
+                                     os.path.join(output_dir, voiced), hook['text'],
+                                     spoken.get('voice'), spoken.get('speed'), None)
+                    name = voiced
+                except Exception as e:
+                    print(f"⚠️ Could not put the hook voice back on {name}: {e}")
+            return name
+
+        try:
+            final = await asyncio.get_event_loop().run_in_executor(None, render)
+        except Exception as e:
+            print(f"❌ Style Error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        final = await _deliver(request, req.job_id, final)
+
+        if remove:
+            clip.pop('style', None)
+        else:
+            clip['style'] = style
+        clip['video_url'] = f"/videos/{req.job_id}/{final}"
+        data['shorts'] = clips
+        write_json_atomic(json_files[0], data, indent=2)
+        mem_clips = (job.get('result') or {}).get('clips') or []
+        if req.clip_index < len(mem_clips):
+            mem_clips[req.clip_index]['video_url'] = clip['video_url']
+            if remove:
+                mem_clips[req.clip_index].pop('style', None)
+            else:
+                mem_clips[req.clip_index]['style'] = style
+    _archive_clip_edit_bg(req.job_id, req.clip_index, final)
+    return {"success": True, "new_video_url": clip['video_url'],
+            "style": None if remove else style}
+
+
 @app.get("/api/hook/voices")
 async def hook_voices():
     import hook_voice
@@ -9266,6 +9435,9 @@ async def add_hook(req: HookRequest, request: Request):
     # second caption layer (see _reapply_captions). The hook layer is stripped
     # too: a new hook REPLACES the burned one (auto-hook or a previous manual
     # one) instead of stacking on top of it.
+    # The spoken intro is the outermost layer: off first, so it is not
+    # mistaken for captions below (a new hook gets its own intro, if any).
+    filename = _strip_hook_voice(output_dir, _strip_watermark_copy(output_dir, filename))
     clean_name = _strip_burned_captions(output_dir, filename, materialize=False)
     had_captions = clean_name != filename
     clean_name = _strip_burned_hook(output_dir, clean_name)

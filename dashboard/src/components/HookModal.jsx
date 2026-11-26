@@ -137,8 +137,47 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
         }
     };
 
+    // Instant intro preview, no render: the first frame held with the hook
+    // text while the voice plays at its speed, then the clip runs with its
+    // own audio (what the server will render: hook_voice.py).
+    const [intro, setIntro] = useState(null); // null | 'voice' | 'video'
+    const [introText, setIntroText] = useState(true);
+    const introVideoRef = useRef(null);
+
+    const stopIntro = () => {
+        if (audioRef.current) audioRef.current.pause();
+        if (introVideoRef.current) introVideoRef.current.pause();
+        setPlaying(false);
+        setIntro(null);
+    };
+
+    const startIntro = () => {
+        if (!voiceReady) return;
+        if (audioRef.current) audioRef.current.pause();
+        setPlaying(false);
+        setIntroText(true);
+        setIntro('voice');
+        const a = new Audio(voiceUrl);
+        a.preservesPitch = true;
+        a.playbackRate = speed;
+        a.onended = () => {
+            setIntro('video');
+            const v = introVideoRef.current;
+            if (v) { v.currentTime = 0; v.muted = false; v.play().catch(() => {}); }
+        };
+        audioRef.current = a;
+        const v = introVideoRef.current;
+        if (v) { v.pause(); v.currentTime = 0; }
+        a.play().catch(() => setIntro(null));
+    };
+
+    useEffect(() => {
+        if (!isOpen) setIntro(null);
+    }, [isOpen]);
+
     const togglePlay = () => {
         if (!voiceReady) return;
+        setIntro(null);
         if (playing && audioRef.current) {
             audioRef.current.pause();
             setPlaying(false);
@@ -194,7 +233,42 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
                 <div className="w-full max-w-[300px] mx-auto md:mx-0 md:w-[300px] shrink-0 self-start flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16]">
-                    {useRemotionPreview ? (
+                    {intro ? (
+                        <>
+                            <video
+                                ref={introVideoRef}
+                                src={videoUrl}
+                                className="w-full h-full object-contain"
+                                playsInline
+                                preload="auto"
+                                onTimeUpdate={(e) => setIntroText(e.currentTarget.currentTime < displayDuration)}
+                                onEnded={() => setIntro(null)}
+                            />
+                            {introText && (
+                                <div className={`absolute w-full px-6 text-center pointer-events-none flex flex-col h-full ${getPositionClass()}`}>
+                                    <div
+                                        className="font-bold px-3 py-2 rounded-xl text-center whitespace-pre-wrap"
+                                        style={{
+                                            ...getSizeStyle(),
+                                            ...FONT_CSS[effectiveFont],
+                                            backgroundColor: (HOOK_STYLES.find((s) => s.value === style) || HOOK_STYLES[0]).box,
+                                            color: (HOOK_STYLES.find((s) => s.value === style) || HOOK_STYLES[0]).text,
+                                        }}
+                                    >
+                                        {text}
+                                    </div>
+                                </div>
+                            )}
+                            <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
+                                <span className="readout bg-black/60 px-1.5 py-0.5 rounded">
+                                    {intro === 'voice' ? `intro ${targetDur?.toFixed(1)}s` : 'clip'}
+                                </span>
+                                <button onClick={stopIntro} className="readout bg-black/60 px-1.5 py-0.5 rounded hover:text-ink">
+                                    stop
+                                </button>
+                            </div>
+                        </>
+                    ) : useRemotionPreview ? (
                         <RemotionPreview
                             videoUrl={videoUrl}
                             durationInSeconds={durationInSeconds || 30}
@@ -404,10 +478,16 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                     {voiceReady && voiceDur && (
                                         <div className="space-y-2">
                                             <div className="flex items-center justify-between">
-                                                <button onClick={togglePlay} className="btn-ghost">
-                                                    {playing ? <Square size={14} /> : <Play size={14} />}
-                                                    {playing ? 'stop' : 'listen'}
-                                                </button>
+                                                <div className="flex gap-2">
+                                                    <button onClick={togglePlay} className="btn-ghost">
+                                                        {playing ? <Square size={14} /> : <Play size={14} />}
+                                                        {playing ? 'stop' : 'listen'}
+                                                    </button>
+                                                    <button onClick={intro ? stopIntro : startIntro} className="btn-ghost" disabled={!videoUrl}>
+                                                        {intro ? <Square size={14} /> : <Play size={14} />}
+                                                        {intro ? 'stop' : 'preview intro'}
+                                                    </button>
+                                                </div>
                                                 <span className="readout">{speed.toFixed(2)}x</span>
                                             </div>
                                             <div className="flex items-center justify-between">

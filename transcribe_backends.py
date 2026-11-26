@@ -1052,6 +1052,21 @@ def transcribe_media(media_path):
 
     backend = os.environ.get("TRANSCRIBE_BACKEND", "whisper").strip().lower()
 
+    if backend == "api":
+        # Online whisper (asr_api.py: Groq / OpenAI). Any failure falls back
+        # to local whisper, so a bad key or an outage never costs the job.
+        import asr_api
+        try:
+            started = time.time()
+            transcript = asr_api.transcribe(media_path)
+            print(f"🎙️ [ASR] online whisper ok in {time.time() - started:.0f}s: "
+                  f"lang={transcript['language']} segments={len(transcript['segments'])}",
+                  flush=True)
+            return transcript
+        except Exception as e:
+            print(f"⚠️ [ASR] online whisper failed ({type(e).__name__}: {e}) — "
+                  f"falling back to local whisper", flush=True)
+
     if backend == "parakeet":
         for attempt in (1, 2):
             try:
