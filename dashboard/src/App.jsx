@@ -1324,6 +1324,8 @@ function App() {
         // The stretch picked under the cost line (seconds); absent = whole video.
         source_start: data.sourceStart ?? null,
         source_end: data.sourceEnd ?? null,
+        // Links only: 'best' = highest resolution offered (up to 4K).
+        source_quality: data.sourceQuality === 'best' ? 'best' : null,
       };
 
       if (data.type === 'url') {

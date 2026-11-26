@@ -5,6 +5,26 @@ OpenShorts tidak dicatat di sini; lihat `git log upstream/main` untuk itu.
 
 ---
 
+## 2026-11-26 — Pilihan kualitas download (1080p / terbaik sampai 4K)
+
+**Diminta:** download tidak harus mentok 1080p ("HD"); opsional, dipilih saat
+memasukkan video untuk generate shorts.
+
+**Diubah:**
+- Form link YouTube: pilihan **Download quality** — **1080p** (default,
+  lebih cepat) atau **Best available** (sampai 4K). Pilihan diingat browser.
+- `Best available`: ambil VP9 di atas 1080p (maks. 2160p) + audio stereo.
+  Video yang maksimal 1080p tetap pakai H.264 1080p seperti biasa.
+- **AV1 tidak dipakai**: OpenCV (deteksi wajah) di image ini tidak bisa
+  membacanya (0 frame). VP9 sudah dicek terbaca ffmpeg dan OpenCV.
+- Dicek ke YouTube tanpa download: video 4K → 2160p VP9 + audio 140;
+  video podcast 1080p → tetap 1080p H.264.
+- Catatan: 4K jauh lebih lambat dirender di CPU dan file lebih besar.
+
+**File:** `main.py`, `app.py`, `dashboard/src/components/MediaInput.jsx`, `dashboard/src/App.jsx`
+
+---
+
 ## 2026-11-26 — Video yang masih diproses bisa dihapus, prosesnya benar-benar berhenti
 
 **Diminta:** video yang sedang diproses juga bisa dihapus, dan prosesnya

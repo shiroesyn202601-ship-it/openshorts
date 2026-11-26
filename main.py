@@ -1253,6 +1253,18 @@ def _download_youtube_video(url, output_dir=".", on_audio=None, allow_paid=True,
     # every YouTube source arrived at 720p and, since the reframe inherits the
     # source height, 80% of delivered clips came out 406x720 (audited 25-jul-2026).
     def _hd_fmt_for(capped):
+        if not capped and os.environ.get("SOURCE_QUALITY", "").strip().lower() == "best":
+            # The user asked for the best the video offers (dashboard
+            # "Download quality: Best available"): above 1080p YouTube serves
+            # only VP9/AV1. VP9 only: OpenCV (face tracking) cannot decode AV1
+            # in this image (0 frames, checked 26-nov-2026). Never above 2160p.
+            # A video without VP9 above 1080p falls through to the usual H.264.
+            return ('bestvideo[height>1080][height<=2160][vcodec^=vp09]+bestaudio[ext=m4a][audio_channels<=2]/'
+                    'bestvideo[height>1080][height<=2160][vcodec^=vp9]+bestaudio[ext=m4a][audio_channels<=2]/'
+                    'bestvideo[height>1080][height<=2160][vcodec^=vp09]+bestaudio[ext=m4a]/'
+                    'bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
+                    'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
+                    'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
         if capped:
             return ('bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/'
                     'bestvideo[vcodec^=avc1][height<=720]+bestaudio/'

@@ -67,6 +67,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
+    // Download quality of a link: '1080' (default) or 'best' (up to 4K).
+    const [sourceQuality, setSourceQuality] = useState(() => {
+        try { return localStorage.getItem('os_source_quality') === 'best' ? 'best' : '1080'; } catch { return '1080'; }
+    });
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -132,8 +136,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
             layout,
             sourceStart: range ? Math.round(range.start) : null,
             sourceEnd: range ? Math.round(range.end) : null,
+            sourceQuality: mode === 'url' ? sourceQuality : null,
         };
         try {
+            localStorage.setItem('os_source_quality', sourceQuality);
             localStorage.setItem('os_auto_hook', autoHook ? '1' : '0');
             localStorage.setItem('os_auto_hook_style_v2', autoHookStyle);
             localStorage.setItem('os_layout', layout);
@@ -305,6 +311,34 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         })}
                     </div>
                 </div>
+
+                {/* Download quality (links only): 1080p H.264 by default; "best"
+                    takes the highest the video offers, up to 4K (VP9/AV1). */}
+                {mode === 'url' && (
+                    <div className="mt-5">
+                        <p className="eyebrow mb-2">Download quality</p>
+                        <div className="grid grid-cols-2 gap-2">
+                            {[
+                                { value: '1080', label: '1080p', hint: 'Faster · smaller file' },
+                                { value: 'best', label: 'Best available', hint: 'Up to 4K · sharper 9:16 crops · much slower on CPU' },
+                            ].map((q) => {
+                                const active = sourceQuality === q.value;
+                                return (
+                                    <button
+                                        key={q.value}
+                                        type="button"
+                                        onClick={() => setSourceQuality(q.value)}
+                                        className={`py-2.5 px-3 rounded-input border text-left transition-colors
+                                            ${active ? 'border-[color:var(--color-accent)] text-ink' : 'border-rule2 text-muted hover:border-[color:var(--color-accent)]'}`}
+                                    >
+                                        <span className="block font-mono text-sm leading-none">{q.label}</span>
+                                        <span className="block mt-1 text-[11px] leading-tight text-muted">{q.hint}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
 
                 {/* Advanced generation controls — collapsed by default; blank = AI decides */}
                 <div className="mt-4">
