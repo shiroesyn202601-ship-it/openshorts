@@ -1621,7 +1621,7 @@ def _strip_burned_captions(output_dir, filename, materialize=True):
     event loop.
     """
     import hooks
-    filename = _strip_watermark_copy(output_dir, filename)
+    filename = _strip_hook_voice(output_dir, _strip_watermark_copy(output_dir, filename))
 
     def stop(name):
         if not os.path.exists(os.path.join(output_dir, name)):
@@ -1641,12 +1641,23 @@ def _strip_burned_captions(output_dir, filename, materialize=True):
         filename = under
 
 
+def _strip_hook_voice(output_dir, filename):
+    """Walk ``voiced_<ts>_`` (the spoken-hook intro, hook_voice.py) back to
+    the file under it. It is always the outermost layer: it shifts the
+    timeline, so captions and the hook are derived from the file below."""
+    while True:
+        m = re.match(r'^voiced_\d+_(.+)$', filename)
+        if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
+            return filename
+        filename = m.group(1)
+
+
 def _strip_burned_hook(output_dir, filename):
     """Walk ``hooked_<ts>_`` (and legacy ``hook_``) prefixes back to the file
     without a burned hook. Same fail-safe contract as _strip_burned_captions:
     the name is returned unchanged when there is nothing to strip or the
     underlying file is gone."""
-    filename = _strip_watermark_copy(output_dir, filename)
+    filename = _strip_hook_voice(output_dir, _strip_watermark_copy(output_dir, filename))
     while True:
         m = re.match(r'^(?:hooked_\d+_|hook_)(.+)$', filename)
         if not m or not os.path.exists(os.path.join(output_dir, m.group(1))):
@@ -7805,7 +7816,7 @@ async def get_clip_edl(job_id: str, clip_index: int, request: Request):
         "canonical_range": canonical_range,
         "duration": total,
         "current_file": current_file,
-        "has_captions": bool(re.match(r'^subtitled_\d+_',
+        "has_captions": bool(re.match(r'^(?:voiced_\d+_)?subtitled_\d+_',
                                       watermarked.clean_name(current_file))),
         "words": words_out,
         "source": {
@@ -8259,6 +8270,19 @@ async def _set_clip_mode_locked(req: ClipModeRequest, request: Request, job):
                                           os.path.join(output_dir, name))
                 if recap:
                     name = os.path.basename(recap)
+            spoken = (clip.get('auto_hook') or {}).get('voice') if had_hook else None
+            if isinstance(spoken, dict):
+                # The spoken intro goes back last (cached WAV, no key needed).
+                import hook_voice
+                voiced = hook_voice.voiced_name(name)
+                try:
+                    hook_voice.apply(os.path.join(output_dir, name),
+                                     os.path.join(output_dir, voiced),
+                                     clip['auto_hook']['text'], spoken.get('voice'),
+                                     spoken.get('speed'), None)
+                    name = voiced
+                except Exception as e:
+                    print(f"⚠️ Could not put the hook voice back on {name}: {e}")
             return name
 
         final = reuse or await loop.run_in_executor(None, layer)
@@ -9150,6 +9174,52 @@ class HookRequest(BaseModel):
     style: Optional[str] = "pill"  # pill/classic/dark/yellow/red/outline/outline_yellow
     font: Optional[str] = None  # montserrat/anton/serif (hooks.HOOK_FONTS); None = the style's own
     remove: Optional[bool] = False  # strip the burned hook instead of adding one
+    # Spoken hook (hook_voice.py): the text read by Gemini TTS at t=0, played
+    # at voice_speed (atempo: faster, never cut).
+    voice: Optional[bool] = False
+    voice_name: Optional[str] = None
+    voice_speed: Optional[float] = 1.0
+
+
+class HookVoicePreviewRequest(BaseModel):
+    job_id: str
+    text: str
+    voice_name: Optional[str] = None
+
+
+@app.post("/api/hook/voice/preview")
+async def hook_voice_preview(req: HookVoicePreviewRequest, request: Request):
+    """The spoken hook as WAV (generated once per text+voice, then cached in
+    the job dir). Its length is in X-Voice-Duration so the editor can show
+    how long it lasts at each speed."""
+    import hook_voice
+    await require_managed_entitlement(request)
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    await _assert_job_owner(request, jobs[req.job_id])
+    output_dir = os.path.join(OUTPUT_DIR, req.job_id)
+    api_key = await resolve_gemini(request)
+    try:
+        path, duration = await asyncio.get_event_loop().run_in_executor(
+            None, hook_voice.ensure_voice, output_dir, req.text, req.voice_name, api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"❌ Hook voice error: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"X-Voice-Duration": f"{duration:.3f}",
+                                 "Access-Control-Expose-Headers": "X-Voice-Duration",
+                                 "Cache-Control": "no-store"})
+
+
+@app.get("/api/hook/voices")
+async def hook_voices():
+    import hook_voice
+    return {"voices": list(hook_voice.VOICES), "default": hook_voice.DEFAULT_VOICE,
+            "min_speed": hook_voice.MIN_SPEED, "max_speed": hook_voice.MAX_SPEED}
+
 
 @app.post("/api/hook")
 async def add_hook(req: HookRequest, request: Request):
@@ -9220,10 +9290,15 @@ async def add_hook(req: HookRequest, request: Request):
         hook_minutes = _cloud_config.EDITOR_ACTION_MINUTES if BILLING_ENABLED else 0
         reservation_id = await reserve_managed_action(
             request, hook_minutes, req.job_id, "hook")
+        voice_key = await resolve_gemini(request) if req.voice else None
 
         try:
             # Run in thread pool
             def run_hook():
+                if req.voice:
+                    # Fail before any encode when the voice cannot be made.
+                    import hook_voice
+                    hook_voice.ensure_voice(output_dir, req.text, req.voice_name, voice_key)
                 return add_hook_to_video(
                     input_path, req.text, output_path, position=req.position or "auto",
                     font_scale=font_scale, duration=req.duration_seconds, style=req.style,
@@ -9249,6 +9324,22 @@ async def add_hook(req: HookRequest, request: Request):
         if recap:
             output_filename = os.path.basename(recap)
 
+    # Spoken hook: prepended as an intro (the clip grows by its length), so
+    # it is the LAST layer: after the captions, whose timing it would shift.
+    voice_info = None
+    if req.voice and not req.remove:
+        import hook_voice
+        voiced = hook_voice.voiced_name(output_filename)
+        try:
+            voice_info = await asyncio.get_event_loop().run_in_executor(
+                None, hook_voice.apply, os.path.join(output_dir, output_filename),
+                os.path.join(output_dir, voiced), req.text, req.voice_name,
+                req.voice_speed, None)
+            output_filename = voiced
+        except Exception as e:
+            print(f"❌ Hook voice error: {e}")
+            raise HTTPException(status_code=500, detail=f"Hook voice failed: {e}")
+
     output_filename = await _deliver(request, req.job_id, output_filename)
 
     # Record the burned hook so the editor knows what the clip carries (the
@@ -9260,6 +9351,8 @@ async def add_hook(req: HookRequest, request: Request):
             "text": req.text, "style": req.style, "font": req.font, "position": req.position,
             "duration_seconds": req.duration_seconds,
         }
+        if voice_info:
+            clip_data['auto_hook']['voice'] = voice_info
 
     # Update Persistence (Same logic as subtitles)
     # Update InMemory Jobs

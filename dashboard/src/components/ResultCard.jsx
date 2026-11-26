@@ -599,7 +599,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsHooking(true);
         setEditError(null);
         try {
-            if (hookData.remotion && !hasServerBurns) {
+            // A spoken hook is mixed into the audio on the server: the
+            // in-browser render cannot do that.
+            const spoken = !!hookData.voice?.enabled;
+            if (hookData.remotion && !hasServerBurns && !spoken) {
                 // Accumulate layer and render all layers together
                 const newLayers = { ...activeLayers, hook: hookData.remotion };
                 setActiveLayers(newLayers);
@@ -621,9 +624,13 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 ? { text: hookData, position: 'top', size: 'M' }
                 : hookData;
 
+            const hookKey = geminiApiKey || localStorage.getItem('gemini_key');
             const res = await apiFetch('/api/hook', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(spoken && hookKey ? { 'X-Gemini-Key': hookKey } : {}),
+                },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: index,
@@ -633,7 +640,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     style: payload.style || 'pill',
                     font: payload.font || null,
                     duration_seconds: payload.remotion?.displayDurationSec ?? null,
-                    input_filename: serverVideoFile
+                    input_filename: serverVideoFile,
+                    voice: spoken,
+                    voice_name: spoken ? payload.voice.name : null,
+                    voice_speed: spoken ? payload.voice.speed : 1.0,
                 })
             });
 
@@ -1338,6 +1348,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}
                 isProcessing={isHooking}
+                jobId={jobId}
+                geminiApiKey={geminiApiKey || localStorage.getItem('gemini_key')}
                 videoUrl={originalVideoUrl}
                 initialText={clip.viral_hook_text}
                 durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}

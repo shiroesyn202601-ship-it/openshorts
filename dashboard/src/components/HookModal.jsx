@@ -1,8 +1,15 @@
-import React, { useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Loader2, Play, Square } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
+import { apiFetch } from '../lib/api';
+
+// Must mirror hook_voice.py VOICES / MIN_SPEED / MAX_SPEED.
+const VOICE_OPTIONS = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Leda', 'Orus', 'Zephyr'];
+const MIN_SPEED = 0.5;
+const MAX_SPEED = 3.0;
+const round1 = (x) => Math.round(x * 10) / 10;
 
 const ENTRANCE_OPTIONS = [
     { value: 'spring', label: 'Bounce' },
@@ -57,7 +64,7 @@ function loadHookPrefs() {
     try { return JSON.parse(localStorage.getItem('os_hook_prefs')) || {}; } catch { return {}; }
 }
 
-export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook }) {
+export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isProcessing, videoUrl, initialText, durationInSeconds, existingSubtitles, hasCaptions, serverRender, burnedHook, jobId, geminiApiKey }) {
     const prefs = loadHookPrefs();
     const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
     // Stored as `pos`, not `position`: before 'auto' existed every save wrote
@@ -70,6 +77,81 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
     const effectiveFont = font || styleFont(style);
     const [entranceAnimation, setEntranceAnimation] = useState(prefs.entranceAnimation || 'spring');
     const [displayDuration, setDisplayDuration] = useState(5);
+
+    // Spoken hook (Gemini TTS). voiceDur is the natural length of the line;
+    // targetDur is how long the user wants it to last. Speed = voiceDur /
+    // targetDur: the whole line is played faster, nothing is cut.
+    const [voiceOn, setVoiceOn] = useState(!!prefs.voiceOn);
+    const [voiceName, setVoiceName] = useState(prefs.voiceName || 'Kore');
+    const [voiceText, setVoiceText] = useState(null); // text the current audio was made from
+    const [voiceUrl, setVoiceUrl] = useState(null);
+    const [voiceDur, setVoiceDur] = useState(null);
+    const [targetDur, setTargetDur] = useState(null);
+    const [voiceLoading, setVoiceLoading] = useState(false);
+    const [voiceError, setVoiceError] = useState(null);
+    const [playing, setPlaying] = useState(false);
+    const audioRef = useRef(null);
+
+    const voiceStale = voiceText !== null && (voiceText.text !== text.trim() || voiceText.name !== voiceName);
+    const voiceReady = !!voiceUrl && !voiceStale;
+    const speed = voiceReady && targetDur
+        ? Math.min(MAX_SPEED, Math.max(MIN_SPEED, voiceDur / targetDur))
+        : 1.0;
+
+    useEffect(() => () => {
+        if (audioRef.current) audioRef.current.pause();
+        if (voiceUrl) URL.revokeObjectURL(voiceUrl);
+    }, [voiceUrl]);
+
+    useEffect(() => {
+        if (!isOpen && audioRef.current) { audioRef.current.pause(); setPlaying(false); }
+    }, [isOpen]);
+
+    const generateVoice = async () => {
+        setVoiceLoading(true);
+        setVoiceError(null);
+        try {
+            const res = await apiFetch('/api/hook/voice/preview', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {}),
+                },
+                body: JSON.stringify({ job_id: jobId, text: text.trim(), voice_name: voiceName }),
+            });
+            if (!res.ok) {
+                let msg = await res.text();
+                try { msg = JSON.parse(msg).detail || msg; } catch { /* plain text */ }
+                throw new Error(msg);
+            }
+            const dur = parseFloat(res.headers.get('X-Voice-Duration')) || null;
+            const blob = await res.blob();
+            setVoiceUrl(URL.createObjectURL(blob));
+            setVoiceText({ text: text.trim(), name: voiceName });
+            setVoiceDur(dur);
+            setTargetDur(dur ? round1(dur) : null);
+        } catch (e) {
+            setVoiceError(e.message || 'Could not generate the voice');
+        } finally {
+            setVoiceLoading(false);
+        }
+    };
+
+    const togglePlay = () => {
+        if (!voiceReady) return;
+        if (playing && audioRef.current) {
+            audioRef.current.pause();
+            setPlaying(false);
+            return;
+        }
+        if (audioRef.current) audioRef.current.pause();
+        const a = new Audio(voiceUrl);
+        a.preservesPitch = true;
+        a.playbackRate = speed;
+        a.onended = () => setPlaying(false);
+        audioRef.current = a;
+        a.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    };
 
     if (!isOpen) return null;
 
@@ -245,7 +327,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                         </div>
 
                         {/* Entrance Animation (new) */}
-                        {!serverRender && (
+                        {!serverRender && !voiceOn && (
                         <div>
                             <p className="eyebrow mb-2">Entrance</p>
                             <SegmentedControl
@@ -276,6 +358,81 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                 <span className="readout">2S</span>
                                 <span className="readout">15S</span>
                             </div>
+                        </div>
+
+                        {/* Spoken hook (Gemini TTS) */}
+                        <div>
+                            <label className="flex items-center justify-between cursor-pointer">
+                                <p className="eyebrow">Voice</p>
+                                <input
+                                    type="checkbox"
+                                    checked={voiceOn}
+                                    onChange={(e) => setVoiceOn(e.target.checked)}
+                                    className="accent-[var(--color-accent)]"
+                                />
+                            </label>
+                            <p className="text-[11px] text-muted mt-1 leading-relaxed">
+                                Read the hook aloud with a Gemini voice as an intro: the first
+                                frame is held while it plays, then the whole clip follows
+                                (nothing is cut, the clip gets longer by the voice length).
+                            </p>
+                            {voiceOn && (
+                                <div className="mt-3 space-y-3">
+                                    <div className="flex gap-2">
+                                        <select
+                                            value={voiceName}
+                                            onChange={(e) => setVoiceName(e.target.value)}
+                                            className="input-field flex-1"
+                                        >
+                                            {VOICE_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
+                                        </select>
+                                        <button
+                                            onClick={generateVoice}
+                                            disabled={voiceLoading || !text.trim()}
+                                            className="btn-ghost shrink-0"
+                                        >
+                                            {voiceLoading && <Loader2 size={14} className="animate-spin" />}
+                                            {voiceLoading ? 'generating...' : (voiceReady ? 'regenerate' : 'generate voice')}
+                                        </button>
+                                    </div>
+                                    {voiceStale && (
+                                        <p className="text-[11px] text-warn">Text or voice changed: generate the voice again.</p>
+                                    )}
+                                    {voiceError && (
+                                        <p className="text-[11px] text-warn break-words">{voiceError}</p>
+                                    )}
+                                    {voiceReady && voiceDur && (
+                                        <div className="space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <button onClick={togglePlay} className="btn-ghost">
+                                                    {playing ? <Square size={14} /> : <Play size={14} />}
+                                                    {playing ? 'stop' : 'listen'}
+                                                </button>
+                                                <span className="readout">{speed.toFixed(2)}x</span>
+                                            </div>
+                                            <div className="flex items-center justify-between">
+                                                <p className="eyebrow">Voice length</p>
+                                                <span className="readout">{voiceDur.toFixed(1)}S → {targetDur?.toFixed(1)}S</span>
+                                            </div>
+                                            <input
+                                                type="range"
+                                                min={Math.max(0.3, round1(voiceDur / MAX_SPEED + 0.05))}
+                                                max={round1(voiceDur / MIN_SPEED)}
+                                                step="0.1"
+                                                value={targetDur || voiceDur}
+                                                onChange={(e) => {
+                                                    setTargetDur(parseFloat(e.target.value));
+                                                    if (audioRef.current) { audioRef.current.pause(); setPlaying(false); }
+                                                }}
+                                                className="w-full accent-[var(--color-accent)]"
+                                            />
+                                            <p className="text-[11px] text-muted leading-relaxed">
+                                                Shorter = the whole line is played faster (same pitch), nothing is cut.
+                                            </p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {burnedHook && (
@@ -310,15 +467,18 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
                                 try {
                                     localStorage.setItem('os_hook_prefs', JSON.stringify({
                                         style, font, pos: position, size, entranceAnimation,
+                                        voiceOn, voiceName,
                                     }));
                                 } catch { /* ignore */ }
+                                if (audioRef.current) { audioRef.current.pause(); setPlaying(false); }
                                 onGenerate({
                                     text, position, size, style, font: effectiveFont,
                                     // Remotion data
                                     remotion: hookConfig,
+                                    voice: voiceOn ? { enabled: true, name: voiceName, speed } : null,
                                 });
                             }}
-                            disabled={isProcessing || !text.trim()}
+                            disabled={isProcessing || !text.trim() || (voiceOn && !voiceReady)}
                             className="btn-primary flex-1"
                         >
                             {isProcessing && <Loader2 size={16} className="animate-spin text-brassink" />}
