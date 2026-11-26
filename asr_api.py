@@ -184,11 +184,11 @@ def _post(cfg, path, pool):
     """One chunk. A rate-limited or rejected key hands the same chunk to the
     next key; server errors and network hiccups are retried a few times."""
     import httpx
-    data = [("model", cfg["model"]), ("response_format", "verbose_json"),
-            ("timestamp_granularities[]", "word"), ("timestamp_granularities[]", "segment"),
-            ("temperature", "0")]
+    # httpx takes a dict for multipart fields; a repeated field is a list.
+    data = {"model": cfg["model"], "response_format": "verbose_json",
+            "timestamp_granularities[]": ["word", "segment"], "temperature": "0"}
     if cfg["language"]:
-        data.append(("language", cfg["language"]))
+        data["language"] = cfg["language"]
     last = None
     failures = 0
     while failures < 3:
@@ -291,8 +291,8 @@ def transcribe(media_path):
         return resp, start
 
     try:
-        with ThreadPoolExecutor(max_workers=cfg["parallel"]) as pool:
-            results = list(pool.map(work, range(len(starts))))
+        with ThreadPoolExecutor(max_workers=cfg["parallel"]) as executor:
+            results = list(executor.map(work, range(len(starts))))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
