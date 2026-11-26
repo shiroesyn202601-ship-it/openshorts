@@ -6939,6 +6939,108 @@ async def _status_from_snapshot(request, snap, queue):
     }
 
 
+_LOCAL_LABEL = ".label"
+
+
+def _job_source_label(job_id, job):
+    """What the user submitted (a link or a file name), for the project list.
+    Read from the job's command while it is in memory and kept in the job dir
+    (``.label``) so it survives a restart. Plain text, shown as text."""
+    path = os.path.join(OUTPUT_DIR, job_id, _LOCAL_LABEL)
+    label = None
+    cmd = (job or {}).get('cmd') or []
+    for i, a in enumerate(cmd[:-1]):
+        if a in ("-u", "--url"):
+            label = str(cmd[i + 1])
+        elif a in ("-i", "--input"):
+            name = os.path.basename(str(cmd[i + 1]))
+            label = name[len(job_id) + 1:] if name.startswith(f"{job_id}_") else name
+    if label:
+        label = label[:300]
+        try:
+            if os.path.isdir(os.path.dirname(path)) and not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(label)
+        except OSError:
+            pass
+        return label
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read(300).strip() or None
+    except OSError:
+        pass
+    for f in glob.glob(os.path.join(UPLOAD_DIR, f"{glob.escape(job_id)}_*")):
+        name = os.path.basename(f)
+        if not name.startswith("thumb_"):
+            return name[len(job_id) + 1:]
+    return None
+
+
+@app.get("/api/local/projects")
+async def list_local_projects(request: Request):
+    """Self-host only: every job on this server (output/ plus the ones still
+    queued or running), newest first, so the dashboard can switch between
+    them. The cloud edition has its own library (/api/projects)."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    seen = set()
+    items = []
+
+    def add(job_id, job_path):
+        if job_id in seen:
+            return
+        job = jobs.get(job_id)
+        meta = None
+        metas = glob.glob(os.path.join(job_path, "*_metadata.json")) if job_path else []
+        if metas:
+            try:
+                with open(metas[0], encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                meta = None
+        if job is None and meta is None:
+            return
+        seen.add(job_id)
+        clips = (meta or {}).get('shorts') or ((job or {}).get('result') or {}).get('clips') or []
+        status = _presented_status(job_id, job) if job else 'completed'
+        try:
+            created = os.path.getctime(job_path) if job_path and os.path.isdir(job_path) else time.time()
+            updated = os.path.getmtime(job_path) if job_path and os.path.isdir(job_path) else created
+        except OSError:
+            created = updated = time.time()
+        first = clips[0] if clips else {}
+        thumb = first.get('video_url')
+        if not thumb and metas:
+            base = os.path.basename(metas[0]).replace('_metadata.json', '')
+            if os.path.exists(os.path.join(job_path, f"{base}_clip_1.mp4")):
+                thumb = f"/videos/{job_id}/{base}_clip_1.mp4"
+        items.append({
+            "job_id": job_id,
+            "status": status,
+            "source": _job_source_label(job_id, job),
+            "title": first.get('video_title_for_youtube_short') or None,
+            "clips": len(clips),
+            "created": created,
+            "updated": updated,
+            "thumb_url": thumb,
+        })
+
+    try:
+        entries = os.listdir(OUTPUT_DIR)
+    except FileNotFoundError:
+        entries = []
+    for name in entries:
+        path = os.path.join(OUTPUT_DIR, name)
+        if name.startswith('.') or not os.path.isdir(path):
+            continue
+        add(name, path)
+    for job_id in list(jobs.keys()):
+        path = os.path.join(OUTPUT_DIR, job_id)
+        add(job_id, path if os.path.isdir(path) else None)
+    items.sort(key=lambda p: p["created"], reverse=True)
+    return {"projects": items}
+
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str, request: Request):
     front_view = request.scope.get(_STATUS_VIEW_KEY)
